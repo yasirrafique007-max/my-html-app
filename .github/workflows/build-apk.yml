@@ -48,28 +48,41 @@ jobs:
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out dist/BridgeLive-HonorX6c-release-v3.apk \
+            --out dist/BridgeLive-HonorX6c-release-v4.apk \
             dist/BridgeLive-HonorX6c-aligned.apk
       - name: Verify final APK
         run: |
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs dist/BridgeLive-HonorX6c-release-v3.apk
-          "$BUILD_TOOLS/aapt" dump badging dist/BridgeLive-HonorX6c-release-v3.apk
-          unzip -t dist/BridgeLive-HonorX6c-release-v3.apk
-          sha256sum dist/BridgeLive-HonorX6c-release-v3.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs dist/BridgeLive-HonorX6c-release-v4.apk
+          "$BUILD_TOOLS/aapt" dump badging dist/BridgeLive-HonorX6c-release-v4.apk
+          unzip -t dist/BridgeLive-HonorX6c-release-v4.apk
+          sha256sum dist/BridgeLive-HonorX6c-release-v4.apk
+      - name: Install on Android 15 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb install -r dist/BridgeLive-HonorX6c-release-v4.apk
+            adb shell pm path com.bridgelive.callassist
+            adb shell am start -n com.bridgelive.callassist/.MainActivity
+            sleep 5
+            adb shell pidof com.bridgelive.callassist
       - name: Record run id
         run: echo "${{ github.run_id }}" > dist/latest-run-id.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: BridgeLive-HonorX6c-Verified-Release-v3
-          path: dist/BridgeLive-HonorX6c-release-v3.apk
+          name: BridgeLive-HonorX6c-Install-Tested-v4
+          path: dist/BridgeLive-HonorX6c-release-v4.apk
           retention-days: 14
-      - name: Commit verified APK and run id to branch
+      - name: Commit install-tested APK and run id
         continue-on-error: true
         run: |
           git config user.name "Bridge Live Build Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -f dist/BridgeLive-HonorX6c-release-v3.apk dist/latest-run-id.txt
-          git commit -m "Build verified HONOR X6c release APK v3 [skip ci]" || exit 0
+          git add -f dist/BridgeLive-HonorX6c-release-v4.apk dist/latest-run-id.txt
+          git commit -m "Build install-tested HONOR X6c APK v4 [skip ci]" || exit 0
           git pull --rebase origin bridge-live-honor || true
           git push || true
