@@ -8,8 +8,8 @@ android {
         applicationId 'com.bridgelive.callassist'
         minSdk 26
         targetSdk 34
-        versionCode 3
-        versionName '0.3.0-release'
+        versionCode 4
+        versionName '0.4.0-install-tested'
     }
 
     buildTypes {
