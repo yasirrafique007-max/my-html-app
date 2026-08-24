@@ -6,10 +6,10 @@ android {
 
     defaultConfig {
         applicationId 'com.bridgelive.callassist'
-        minSdk 26
+        minSdk 23
         targetSdk 34
-        versionCode 6
-        versionName '0.6.0-honor'
+        versionCode 7
+        versionName '0.7.0-honor'
     }
 
     buildTypes {
@@ -29,4 +29,4 @@ android {
     }
 }
 
-// HONOR X6c compatibility build v6
+// HONOR X6c compatibility build v7: force legacy v1 signing support
