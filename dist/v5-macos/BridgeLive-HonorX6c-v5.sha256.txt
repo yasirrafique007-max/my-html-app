@@ -1,1 +1,1 @@
-f201c52a86d1f30e47ba83107371bd136153a47bc398ccc6ffd04c900edd2dc8  dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+2482f3db9c856573e2fc64d69817170ec93e262f051a90b99a1256ef8b6f5b5b  dist/v5-macos/BridgeLive-HonorX6c-v5.apk
