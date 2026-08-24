@@ -1,11 +1,11 @@
-name: Build Bridge Live HONOR APK
+name: Build Bridge Live HONOR Release APK
 on:
   push:
     branches: ["main"]
     paths: [".github/workflows/build-bridge-live-honor.yml"]
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,24 +20,48 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-      - name: Install Android 35
+      - name: Install Android 35 build tools
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
-      - name: Save APK to Android branch
+      - name: Build unsigned release APK
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Create signing key
         run: |
+          keytool -genkeypair -v \
+            -keystore bridgelive-release.jks \
+            -storepass BridgeLive2026 \
+            -keypass BridgeLive2026 \
+            -alias bridgelive \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Bridge Live, OU=Personal, O=Bridge Live, L=London, ST=London, C=GB"
+      - name: Align and explicitly sign APK with v1 v2 v3
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/BridgeLive-HonorX6c-debug.apk
-          git config user.name "Bridge Live Build Bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add -f dist/BridgeLive-HonorX6c-debug.apk
-          git commit -m "Build HONOR X6c debug APK [skip ci]" || exit 0
-          git push origin HEAD:bridge-live-honor
+          "$BUILD_TOOLS/zipalign" -p -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            dist/BridgeLive-HonorX6c-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks bridgelive-release.jks \
+            --ks-key-alias bridgelive \
+            --ks-pass pass:BridgeLive2026 \
+            --key-pass pass:BridgeLive2026 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out dist/BridgeLive-HonorX6c-release-v3.apk \
+            dist/BridgeLive-HonorX6c-aligned.apk
+      - name: Verify install package
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs dist/BridgeLive-HonorX6c-release-v3.apk
+          "$BUILD_TOOLS/aapt" dump badging dist/BridgeLive-HonorX6c-release-v3.apk
+          unzip -t dist/BridgeLive-HonorX6c-release-v3.apk
+          sha256sum dist/BridgeLive-HonorX6c-release-v3.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: BridgeLive-HonorX6c-APK
-          path: dist/BridgeLive-HonorX6c-debug.apk
+          name: BridgeLive-HonorX6c-Release-v3
+          path: dist/BridgeLive-HonorX6c-release-v3.apk
           retention-days: 14
