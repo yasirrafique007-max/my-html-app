@@ -1,0 +1,75 @@
+name: Build Bridge Live HONOR v5 macOS
+on:
+  push:
+    branches: ["bridge-live-honor"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build Bridge Live release
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Create signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore bridgelive-v5.jks \
+            -storepass BridgeLive2026 \
+            -keypass BridgeLive2026 \
+            -alias bridgelive \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Bridge Live, OU=Personal, O=Bridge Live, L=London, ST=London, C=GB"
+      - name: Align sign and verify
+        run: |
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p dist/v5-macos
+          "$BT/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk dist/v5-macos/BridgeLive-HonorX6c-v5-aligned.apk
+          "$BT/apksigner" sign \
+            --ks bridgelive-v5.jks \
+            --ks-key-alias bridgelive \
+            --ks-pass pass:BridgeLive2026 \
+            --key-pass pass:BridgeLive2026 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out dist/v5-macos/BridgeLive-HonorX6c-v5.apk \
+            dist/v5-macos/BridgeLive-HonorX6c-v5-aligned.apk
+          "$BT/zipalign" -c -v 4 dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+          "$BT/apksigner" verify --verbose --print-certs dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+          "$BT/aapt" dump badging dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+          unzip -t dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+          shasum -a 256 dist/v5-macos/BridgeLive-HonorX6c-v5.apk | tee dist/v5-macos/BridgeLive-HonorX6c-v5.sha256.txt
+          echo "${{ github.run_id }}" > dist/v5-macos/run-id.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BridgeLive-HonorX6c-v5-macOS
+          path: |
+            dist/v5-macos/BridgeLive-HonorX6c-v5.apk
+            dist/v5-macos/BridgeLive-HonorX6c-v5.sha256.txt
+          retention-days: 14
+      - name: Publish verified APK to branch
+        run: |
+          git config user.name "Bridge Live Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f dist/v5-macos/BridgeLive-HonorX6c-v5.apk dist/v5-macos/BridgeLive-HonorX6c-v5.sha256.txt dist/v5-macos/run-id.txt
+          git commit -m "Publish Bridge Live HONOR X6c v5 APK [skip ci]" || exit 0
+          for i in 1 2 3; do
+            git pull --rebase origin bridge-live-honor || true
+            git push origin HEAD:bridge-live-honor && exit 0
+            sleep 5
+          done
+          exit 1
