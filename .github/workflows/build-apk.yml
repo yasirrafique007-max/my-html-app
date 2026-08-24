@@ -62,10 +62,12 @@ jobs:
           name: BridgeLive-HonorX6c-Verified-Release-v3
           path: dist/BridgeLive-HonorX6c-release-v3.apk
           retention-days: 14
-      - name: Commit verified APK to branch
+      - name: Try to commit verified APK to branch
+        continue-on-error: true
         run: |
           git config user.name "Bridge Live Build Bot"
           git config user.email "actions@users.noreply.github.com"
           git add -f dist/BridgeLive-HonorX6c-release-v3.apk
           git commit -m "Build verified HONOR X6c release APK v3 [skip ci]" || exit 0
-          git push
+          git pull --rebase origin bridge-live-honor || true
+          git push || true
