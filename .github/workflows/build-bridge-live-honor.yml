@@ -7,7 +7,7 @@ on:
     branches: ["main"]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -62,6 +62,14 @@ jobs:
           "$BUILD_TOOLS/aapt" dump badging dist/BridgeLive-HonorX6c-release-v3.apk
           unzip -t dist/BridgeLive-HonorX6c-release-v3.apk
           sha256sum dist/BridgeLive-HonorX6c-release-v3.apk
+      - name: Commit verified APK to Android branch
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "Bridge Live Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f dist/BridgeLive-HonorX6c-release-v3.apk
+          git commit -m "Add verified signed HONOR release APK v3 [skip ci]" || exit 0
+          git push origin HEAD:bridge-live-honor
       - uses: actions/upload-artifact@v4
         with:
           name: BridgeLive-HonorX6c-Release-v3
