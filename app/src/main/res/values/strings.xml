@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Bridge Live Call Assist</string>
+    <string name="accessibility_desc">Shows Arabic to English and English to Arabic translation controls over WhatsApp when call notifications are detected.</string>
+</resources>
