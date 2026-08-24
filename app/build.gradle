@@ -7,9 +7,9 @@ android {
     defaultConfig {
         applicationId 'com.bridgelive.callassist'
         minSdk 26
-        targetSdk 35
-        versionCode 5
-        versionName '0.5.0-honor'
+        targetSdk 34
+        versionCode 6
+        versionName '0.6.0-honor'
     }
 
     buildTypes {
@@ -19,6 +19,7 @@ android {
         }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
