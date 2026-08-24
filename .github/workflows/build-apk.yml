@@ -57,17 +57,19 @@ jobs:
           "$BUILD_TOOLS/aapt" dump badging dist/BridgeLive-HonorX6c-release-v3.apk
           unzip -t dist/BridgeLive-HonorX6c-release-v3.apk
           sha256sum dist/BridgeLive-HonorX6c-release-v3.apk
+      - name: Record run id
+        run: echo "${{ github.run_id }}" > dist/latest-run-id.txt
       - uses: actions/upload-artifact@v4
         with:
           name: BridgeLive-HonorX6c-Verified-Release-v3
           path: dist/BridgeLive-HonorX6c-release-v3.apk
           retention-days: 14
-      - name: Try to commit verified APK to branch
+      - name: Commit verified APK and run id to branch
         continue-on-error: true
         run: |
           git config user.name "Bridge Live Build Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -f dist/BridgeLive-HonorX6c-release-v3.apk
+          git add -f dist/BridgeLive-HonorX6c-release-v3.apk dist/latest-run-id.txt
           git commit -m "Build verified HONOR X6c release APK v3 [skip ci]" || exit 0
           git pull --rebase origin bridge-live-honor || true
           git push || true
