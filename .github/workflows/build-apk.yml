@@ -2,6 +2,8 @@ name: Build HONOR X6c APK
 on:
   push:
     branches: ["bridge-live-honor"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 permissions:
   contents: write
@@ -32,6 +34,7 @@ jobs:
           path: dist/BridgeLive-HonorX6c-debug.apk
           retention-days: 14
       - name: Commit APK to branch
+        if: github.event_name == 'push'
         run: |
           git config user.name "Bridge Live Build Bot"
           git config user.email "actions@users.noreply.github.com"
