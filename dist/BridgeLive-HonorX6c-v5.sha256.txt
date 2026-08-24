@@ -1,1 +1,1 @@
-ae86a6ad1161a6526589185804a26cd0f471d16e313f95c63c2e13ff81537386  dist/BridgeLive-HonorX6c-v5.apk
+e8e2f501295ff578a3d8457dc32583f9dda4aabcf1df46a95c95d9871ada0d54  dist/BridgeLive-HonorX6c-v5.apk
