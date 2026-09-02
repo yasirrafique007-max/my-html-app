@@ -1,0 +1,240 @@
+package com.neospos.tap;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
+public final class Backend {
+    private static final String BASE = "https://lvwypfbnfmqazepigaug.supabase.co";
+    private static final String API_KEY = "sb_publishable_tW1YEDt_sac3qkiDXdB7CA_PeieIGpw";
+    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+    private static final Backend INSTANCE = new Backend();
+
+    private final OkHttpClient http = new OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build();
+
+    private volatile String accessToken;
+    private volatile String userId;
+    private volatile String merchantId;
+    private volatile String storeId;
+    private volatile String tillId;
+    private volatile String storeName;
+    private volatile String tillName;
+
+    public static Backend get() { return INSTANCE; }
+    private Backend() {}
+
+    public static final class Session {
+        public final String merchantId;
+        public final String storeId;
+        public final String tillId;
+        public final String storeName;
+        public final String tillName;
+        Session(String merchantId, String storeId, String tillId, String storeName, String tillName) {
+            this.merchantId = merchantId;
+            this.storeId = storeId;
+            this.tillId = tillId;
+            this.storeName = storeName;
+            this.tillName = tillName;
+        }
+    }
+
+    public static final class Bootstrap {
+        public final String secret;
+        public final String locationId;
+        Bootstrap(String secret, String locationId) {
+            this.secret = secret;
+            this.locationId = locationId;
+        }
+    }
+
+    public static final class IntentData {
+        public final String clientSecret;
+        public final String paymentIntentId;
+        public final String receiptNo;
+        public final long amountMinor;
+        IntentData(String clientSecret, String paymentIntentId, String receiptNo, long amountMinor) {
+            this.clientSecret = clientSecret;
+            this.paymentIntentId = paymentIntentId;
+            this.receiptNo = receiptNo;
+            this.amountMinor = amountMinor;
+        }
+    }
+
+    public Session loginAndPrepare(String email, String password) throws Exception {
+        JSONObject login = new JSONObject();
+        login.put("email", email.trim());
+        login.put("password", password);
+        JSONObject auth = requestJson("POST", BASE + "/auth/v1/token?grant_type=password", login, false, false);
+        accessToken = require(auth, "access_token");
+        JSONObject user = auth.getJSONObject("user");
+        userId = require(user, "id");
+
+        JSONArray memberships = requestArray("GET", BASE + "/rest/v1/merchant_users?select=merchant_id,role&user_id=eq." + enc(userId) + "&limit=1");
+        if (memberships.length() == 0) throw new IOException("No NEOSPOS merchant is linked to this login.");
+        merchantId = memberships.getJSONObject(0).getString("merchant_id");
+
+        ensureStore();
+        ensureTill();
+        return new Session(merchantId, storeId, tillId, storeName, tillName);
+    }
+
+    private void ensureStore() throws Exception {
+        JSONArray stores = requestArray("GET", BASE + "/rest/v1/stores?select=id,name&merchant_id=eq." + enc(merchantId) + "&order=created_at.asc&limit=1");
+        if (stores.length() == 0) {
+            JSONObject body = new JSONObject();
+            body.put("merchant_id", merchantId);
+            body.put("name", "Main Store");
+            body.put("address_line1", "1 High Street");
+            body.put("city", "London");
+            body.put("postcode", "SW1A 1AA");
+            body.put("country", "GB");
+            JSONArray created = requestRestInsert("stores", body);
+            if (created.length() == 0) throw new IOException("Could not create the test store.");
+            storeId = created.getJSONObject(0).getString("id");
+            storeName = created.getJSONObject(0).optString("name", "Main Store");
+        } else {
+            storeId = stores.getJSONObject(0).getString("id");
+            storeName = stores.getJSONObject(0).optString("name", "Main Store");
+        }
+    }
+
+    private void ensureTill() throws Exception {
+        JSONArray tills = requestArray("GET", BASE + "/rest/v1/tills?select=id,name&merchant_id=eq." + enc(merchantId) + "&store_id=eq." + enc(storeId) + "&order=created_at.asc&limit=1");
+        if (tills.length() == 0) {
+            JSONObject body = new JSONObject();
+            body.put("merchant_id", merchantId);
+            body.put("store_id", storeId);
+            body.put("name", "Phone Till");
+            body.put("status", "mobile_tap_to_pay");
+            JSONArray created = requestRestInsert("tills", body);
+            if (created.length() == 0) throw new IOException("Could not create the phone till.");
+            tillId = created.getJSONObject(0).getString("id");
+            tillName = created.getJSONObject(0).optString("name", "Phone Till");
+        } else {
+            tillId = tills.getJSONObject(0).getString("id");
+            tillName = tills.getJSONObject(0).optString("name", "Phone Till");
+        }
+    }
+
+    public Bootstrap terminalBootstrap() throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("store_id", storeId);
+        JSONObject out = function("tap-to-pay-test-token", body);
+        return new Bootstrap(require(out, "secret"), require(out, "location_id"));
+    }
+
+    public IntentData createTestIntent(long amountMinor) throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("store_id", storeId);
+        body.put("till_id", tillId);
+        body.put("amount_minor", amountMinor);
+        JSONObject out = function("tap-to-pay-test-intent", body);
+        return new IntentData(
+                require(out, "client_secret"),
+                require(out, "payment_intent_id"),
+                require(out, "receipt_no"),
+                out.getLong("amount_minor")
+        );
+    }
+
+    public String paymentStatus(String paymentIntentId) throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("payment_intent_id", paymentIntentId);
+        JSONObject out = function("tap-to-pay-test-status", body);
+        return require(out, "status");
+    }
+
+    public String getMerchantId() { return merchantId; }
+    public String getStoreId() { return storeId; }
+    public String getTillId() { return tillId; }
+    public boolean isLoggedIn() { return accessToken != null && merchantId != null; }
+
+    private JSONObject function(String slug, JSONObject body) throws Exception {
+        return requestJson("POST", BASE + "/functions/v1/" + slug, body, true, false);
+    }
+
+    private JSONArray requestRestInsert(String table, JSONObject body) throws Exception {
+        Request request = baseRequest(BASE + "/rest/v1/" + table, true)
+                .header("Prefer", "return=representation")
+                .post(RequestBody.create(body.toString(), JSON))
+                .build();
+        String text = execute(request);
+        return new JSONArray(text);
+    }
+
+    private JSONArray requestArray(String method, String url) throws Exception {
+        Request.Builder b = baseRequest(url, true);
+        if ("GET".equals(method)) b.get();
+        String text = execute(b.build());
+        return new JSONArray(text);
+    }
+
+    private JSONObject requestJson(String method, String url, JSONObject body, boolean authenticated, boolean prefer) throws Exception {
+        Request.Builder b = baseRequest(url, authenticated);
+        if (prefer) b.header("Prefer", "return=representation");
+        if ("POST".equals(method)) b.post(RequestBody.create(body.toString(), JSON));
+        else if ("GET".equals(method)) b.get();
+        String text = execute(b.build());
+        return new JSONObject(text);
+    }
+
+    private Request.Builder baseRequest(String url, boolean authenticated) {
+        Request.Builder b = new Request.Builder()
+                .url(url)
+                .header("apikey", API_KEY)
+                .header("Accept", "application/json");
+        if (authenticated && accessToken != null) {
+            b.header("Authorization", "Bearer " + accessToken);
+        }
+        return b;
+    }
+
+    private String execute(Request request) throws Exception {
+        try (Response response = http.newCall(request).execute()) {
+            String text = response.body() == null ? "" : response.body().string();
+            if (!response.isSuccessful()) {
+                String message = text;
+                try {
+                    JSONObject e = new JSONObject(text);
+                    if (e.has("error")) message = e.getString("error");
+                    else if (e.has("message")) message = e.getString("message");
+                    else if (e.has("msg")) message = e.getString("msg");
+                } catch (Exception ignored) {}
+                throw new IOException(message.isEmpty() ? ("Request failed: " + response.code()) : message);
+            }
+            return text;
+        }
+    }
+
+    private void requireSession() throws IOException {
+        if (!isLoggedIn() || storeId == null || tillId == null) throw new IOException("Login to NEOSPOS first.");
+    }
+
+    private static String require(JSONObject o, String key) throws Exception {
+        String value = o.optString(key, "");
+        if (value.isEmpty()) throw new IOException("Missing " + key + " from backend response.");
+        return value;
+    }
+
+    private static String enc(String value) {
+        return value.replace(" ", "%20").replace("+", "%2B").replace("@", "%40");
+    }
+}
