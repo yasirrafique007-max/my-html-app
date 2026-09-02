@@ -80,6 +80,15 @@ public final class Backend {
         }
     }
 
+    public static final class PendingRequest {
+        public final String requestId;
+        public final long amountMinor;
+        PendingRequest(String requestId, long amountMinor) {
+            this.requestId = requestId;
+            this.amountMinor = amountMinor;
+        }
+    }
+
     public static final class RequestState {
         public final String requestStatus;
         public final String paymentIntentStatus;
@@ -176,6 +185,16 @@ public final class Backend {
                 require(out, "receipt_no"),
                 out.getLong("amount_minor")
         );
+    }
+
+    public PendingRequest peekPendingEposRequest() throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        JSONObject out = function("tap-peek-request", body);
+        if (!out.optBoolean("pending", false) || !out.has("request") || out.isNull("request")) return null;
+        JSONObject r = out.getJSONObject("request");
+        return new PendingRequest(require(r, "id"), r.optLong("amount_minor", 0));
     }
 
     public EposIntent claimNextEposRequest() throws Exception {
