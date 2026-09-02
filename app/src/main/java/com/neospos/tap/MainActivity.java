@@ -2,10 +2,11 @@ package com.neospos.tap;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
@@ -48,14 +49,27 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     private EditText amount;
     private TextView status;
     private TextView context;
+    private TextView queueStatus;
     private Button login;
     private Button connect;
+    private Button checkEpos;
     private Button pay;
 
     private volatile boolean terminalReady = false;
     private volatile boolean readerConnected = false;
     private volatile boolean busy = false;
+    private volatile boolean queueClaimInFlight = false;
     private String locationId;
+
+    private final Handler queueHandler = new Handler(Looper.getMainLooper());
+    private final Runnable queuePoller = new Runnable() {
+        @Override public void run() {
+            if (readerConnected && Backend.get().isLoggedIn() && !busy && !queueClaimInFlight) {
+                claimEposRequest(false);
+            }
+            queueHandler.postDelayed(this, 2000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +77,12 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         setContentView(buildUi());
         requestNeededPermissions();
         checkDeviceBasics();
+    }
+
+    @Override
+    protected void onDestroy() {
+        queueHandler.removeCallbacks(queuePoller);
+        super.onDestroy();
     }
 
     private View buildUi() {
@@ -83,9 +103,8 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         badgeLp.bottomMargin = dp(12);
         root.addView(badge, badgeLp);
 
-        TextView title = text("NEOSPOS Tap", 29, true, Color.rgb(15, 23, 42));
-        root.addView(title);
-        TextView subtitle = text("Turn this Android phone into a contactless card terminal.", 15, false, Color.rgb(71, 85, 105));
+        root.addView(text("NEOSPOS Tap", 29, true, Color.rgb(15, 23, 42)));
+        TextView subtitle = text("Android Tap to Pay terminal for your NEOSPOS EPOS.", 15, false, Color.rgb(71, 85, 105));
         LinearLayout.LayoutParams subLp = match(); subLp.bottomMargin = dp(20); root.addView(subtitle, subLp);
 
         status = text("Checking phone…", 14, true, Color.rgb(30, 64, 175));
@@ -112,7 +131,17 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         connect.setOnClickListener(v -> connectTapToPay());
         root.addView(connect, buttonLp());
 
-        root.addView(section("3. Take payment"));
+        root.addView(section("3. EPOS payment queue"));
+        queueStatus = text("Connect the phone and it will watch the Mac EPOS automatically.", 13, false, Color.rgb(71, 85, 105));
+        queueStatus.setPadding(dp(12), dp(10), dp(12), dp(10));
+        queueStatus.setBackgroundColor(Color.WHITE);
+        LinearLayout.LayoutParams queueLp = match(); queueLp.bottomMargin = dp(10); root.addView(queueStatus, queueLp);
+        checkEpos = button("Check EPOS now");
+        checkEpos.setEnabled(false);
+        checkEpos.setOnClickListener(v -> claimEposRequest(true));
+        root.addView(checkEpos, buttonLp());
+
+        root.addView(section("4. Manual amount test"));
         amount = field("Amount in GBP, e.g. 1.00", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         amount.setText("1.00");
         root.addView(amount, fieldLp());
@@ -124,7 +153,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         amount.setOnFocusChangeListener((v, hasFocus) -> updatePayLabel());
 
         TextView note = text(
-                "For a real card tap: use the signed release APK, Android 13+, NFC on, Google Play Services present, current security updates, and Developer options OFF.",
+                "For real Tap to Pay: Android 13+, NFC on, Google Play Services present, current security updates, screen lock enabled, and Developer options OFF.",
                 12, false, Color.rgb(100, 116, 139));
         root.addView(note);
         return scroll;
@@ -175,8 +204,8 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     private void connectTapToPay() {
         if (!terminalReady || !Backend.get().isLoggedIn()) { setStatus("Login first.", true); return; }
         if (!permissionsGranted()) { requestNeededPermissions(); setStatus("Allow location and nearby-device permissions, then tap Connect again.", true); return; }
-        if (!BuildConfig.DEBUG && developerOptionsEnabled()) {
-            setStatus("Turn Developer options OFF on the Android phone before using real Tap to Pay.", true);
+        if (developerOptionsEnabled()) {
+            setStatus("Turn Developer options OFF before using real Tap to Pay.", true);
             return;
         }
         setBusy(true, "Preparing Stripe Tap to Pay…");
@@ -192,9 +221,8 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     }
 
     private void startEasyConnect(String locationId) {
-        boolean simulated = BuildConfig.DEBUG;
         DiscoveryConfiguration.TapToPayDiscoveryConfiguration discovery =
-                new DiscoveryConfiguration.TapToPayDiscoveryConfiguration(simulated);
+                new DiscoveryConfiguration.TapToPayDiscoveryConfiguration(false);
         ConnectionConfiguration.TapToPayConnectionConfiguration connection =
                 new ConnectionConfiguration.TapToPayConnectionConfiguration(
                         new TapUseCase.Pay(locationId),
@@ -209,8 +237,9 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
             public void onSuccess(Reader reader) {
                 readerConnected = true;
                 runOnUiThread(() -> {
-                    pay.setEnabled(true);
-                    setBusy(false, "Tap to Pay ready. Enter an amount and take payment.");
+                    setBusy(false, "Tap to Pay ready. This phone is now watching the EPOS queue.");
+                    setQueueStatus("LIVE • Waiting for a card payment from the Mac EPOS.", false);
+                    startQueuePolling();
                 });
             }
 
@@ -220,6 +249,117 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                 runOnUiThread(() -> setBusy(false, "Could not connect phone reader: " + e.getErrorMessage()));
             }
         });
+    }
+
+    private void startQueuePolling() {
+        queueHandler.removeCallbacks(queuePoller);
+        queueHandler.post(queuePoller);
+    }
+
+    private void claimEposRequest(boolean userRequested) {
+        if (!readerConnected) { if (userRequested) setQueueStatus("Connect Tap to Pay first.", true); return; }
+        if (queueClaimInFlight || busy) return;
+        queueClaimInFlight = true;
+        if (userRequested) setQueueStatus("Checking the EPOS queue…", false);
+        new Thread(() -> {
+            try {
+                Backend.EposIntent request = Backend.get().claimNextEposRequest();
+                if (request != null) {
+                    runOnUiThread(() -> {
+                        busy = true;
+                        updateControls();
+                        setQueueStatus("EPOS request received • £" + String.format(Locale.UK, "%.2f", request.amountMinor / 100.0) + " • " + request.receiptNo, false);
+                        processEposIntent(request);
+                    });
+                } else if (userRequested) {
+                    runOnUiThread(() -> setQueueStatus("No waiting EPOS card payment yet. Watching automatically…", false));
+                }
+            } catch (Exception ex) {
+                if (userRequested) runOnUiThread(() -> setQueueStatus("EPOS queue error: " + ex.getMessage(), true));
+            } finally {
+                queueClaimInFlight = false;
+            }
+        }).start();
+    }
+
+    private void processEposIntent(Backend.EposIntent data) {
+        Terminal.getInstance().retrievePaymentIntent(data.clientSecret, new PaymentIntentCallback() {
+            @Override
+            public void onSuccess(PaymentIntent paymentIntent) {
+                CollectPaymentIntentConfiguration collectConfig = new CollectPaymentIntentConfiguration.Builder().build();
+                ConfirmPaymentIntentConfiguration confirmConfig = new ConfirmPaymentIntentConfiguration.Builder().build();
+                setStatus("EPOS payment • Hold the customer's card or phone to this Android device…", false);
+                setQueueStatus("TAKE PAYMENT • £" + String.format(Locale.UK, "%.2f", data.amountMinor / 100.0), false);
+                Terminal.getInstance().processPaymentIntent(paymentIntent, collectConfig, confirmConfig, new PaymentIntentCallback() {
+                    @Override
+                    public void onSuccess(PaymentIntent processed) {
+                        setStatus("Card accepted. Confirming the EPOS sale…", false);
+                        setQueueStatus("Card accepted • confirming with Stripe…", false);
+                        confirmEposBackend(data);
+                    }
+
+                    @Override
+                    public void onFailure(TerminalException e) {
+                        failEposRequest(data, e.getErrorMessage());
+                    }
+                });
+            }
+
+            @Override
+            public void onFailure(TerminalException e) {
+                failEposRequest(data, e.getErrorMessage());
+            }
+        });
+    }
+
+    private void confirmEposBackend(Backend.EposIntent data) {
+        new Thread(() -> {
+            try {
+                Backend.RequestState state = null;
+                for (int i = 0; i < 20; i++) {
+                    state = Backend.get().requestStatus(data.requestId);
+                    if ("succeeded".equalsIgnoreCase(state.requestStatus) || "failed".equalsIgnoreCase(state.requestStatus)) break;
+                    Thread.sleep(750);
+                }
+                Backend.RequestState finalState = state;
+                runOnUiThread(() -> {
+                    busy = false;
+                    updateControls();
+                    if (finalState != null && "succeeded".equalsIgnoreCase(finalState.requestStatus)) {
+                        String receipt = finalState.receiptNo == null || finalState.receiptNo.isEmpty() ? data.receiptNo : finalState.receiptNo;
+                        setStatus("APPROVED ✓  " + receipt + " • £" + String.format(Locale.UK, "%.2f", data.amountMinor / 100.0), false);
+                        setQueueStatus("APPROVED ✓  EPOS has been updated.", false);
+                    } else if (finalState != null && "failed".equalsIgnoreCase(finalState.requestStatus)) {
+                        String why = finalState.errorMessage == null || finalState.errorMessage.isEmpty() ? "Payment failed" : finalState.errorMessage;
+                        setStatus("Payment failed: " + why, true);
+                        setQueueStatus("FAILED • The Mac EPOS can retry the card payment.", true);
+                    } else {
+                        setStatus("Card processed; Stripe confirmation is still pending.", false);
+                        setQueueStatus("Processing • EPOS is still checking Stripe.", false);
+                    }
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    updateControls();
+                    setStatus("Card processed; EPOS confirmation error: " + ex.getMessage(), true);
+                    setQueueStatus("Check the Payments screen on the Mac EPOS.", true);
+                });
+            }
+        }).start();
+    }
+
+    private void failEposRequest(Backend.EposIntent data, String reason) {
+        final String message = reason == null || reason.isEmpty() ? "Tap to Pay failed" : reason;
+        new Thread(() -> {
+            try { Backend.get().failRequest(data.requestId, message); } catch (Exception ignored) {}
+            runOnUiThread(() -> {
+                busy = false;
+                updateControls();
+                setStatus("Payment failed: " + message, true);
+                setQueueStatus("FAILED • The Mac EPOS can send the card payment again.", true);
+            });
+        }).start();
     }
 
     private void takePayment() {
@@ -232,19 +372,19 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
             setStatus("Enter a valid amount such as 1.00.", true); return;
         }
         if (minor < 50 || minor > 100000) { setStatus("Use an amount between £0.50 and £1,000.00.", true); return; }
-        setBusy(true, "Creating £" + String.format(Locale.UK, "%.2f", minor / 100.0) + " card-present payment…");
+        setBusy(true, "Creating £" + String.format(Locale.UK, "%.2f", minor / 100.0) + " manual card-present payment…");
         final long finalMinor = minor;
         new Thread(() -> {
             try {
                 Backend.IntentData data = Backend.get().createTestIntent(finalMinor);
-                runOnUiThread(() -> retrieveAndProcess(data));
+                runOnUiThread(() -> retrieveAndProcessManual(data));
             } catch (Exception ex) {
                 runOnUiThread(() -> setBusy(false, "Could not create payment: " + ex.getMessage()));
             }
         }).start();
     }
 
-    private void retrieveAndProcess(Backend.IntentData data) {
+    private void retrieveAndProcessManual(Backend.IntentData data) {
         Terminal.getInstance().retrievePaymentIntent(data.clientSecret, new PaymentIntentCallback() {
             @Override
             public void onSuccess(PaymentIntent paymentIntent) {
@@ -255,7 +395,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                     @Override
                     public void onSuccess(PaymentIntent processed) {
                         setStatus("Card accepted. Confirming sale…", false);
-                        new Thread(() -> confirmBackend(data)).start();
+                        new Thread(() -> confirmManualBackend(data)).start();
                     }
 
                     @Override
@@ -267,12 +407,12 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
 
             @Override
             public void onFailure(TerminalException e) {
-                setBusy(false, "Could not load payment: " + e.getErrorMessage());
+                runOnUiThread(() -> setBusy(false, "Could not load payment: " + e.getErrorMessage()));
             }
         });
     }
 
-    private void confirmBackend(Backend.IntentData data) {
+    private void confirmManualBackend(Backend.IntentData data) {
         try {
             String s = Backend.get().paymentStatus(data.paymentIntentId);
             runOnUiThread(() -> {
@@ -309,7 +449,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     private void checkDeviceBasics() {
         boolean nfc = getPackageManager().hasSystemFeature(PackageManager.FEATURE_NFC);
         if (!nfc) setStatus("This Android phone has no NFC hardware; Tap to Pay cannot run on it.", true);
-        else if (!BuildConfig.DEBUG && developerOptionsEnabled()) setStatus("NFC found. Turn Developer options OFF before real Tap to Pay.", true);
+        else if (developerOptionsEnabled()) setStatus("NFC found. Turn Developer options OFF before real Tap to Pay.", true);
         else setStatus("NFC found. Login to prepare Tap to Pay.", false);
     }
 
@@ -326,16 +466,27 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
 
     private void setBusy(boolean value, String message) {
         busy = value;
-        login.setEnabled(!value);
-        connect.setEnabled(!value && Backend.get().isLoggedIn());
-        pay.setEnabled(!value && readerConnected);
+        updateControls();
         setStatus(message, false);
+    }
+
+    private void updateControls() {
+        login.setEnabled(!busy);
+        connect.setEnabled(!busy && Backend.get().isLoggedIn());
+        checkEpos.setEnabled(!busy && readerConnected);
+        pay.setEnabled(!busy && readerConnected);
     }
 
     private void setStatus(String message, boolean error) {
         status.setText(message == null ? "" : message);
         status.setTextColor(error ? Color.rgb(153, 27, 27) : Color.rgb(30, 64, 175));
         status.setBackgroundColor(error ? Color.rgb(254, 242, 242) : Color.rgb(239, 246, 255));
+    }
+
+    private void setQueueStatus(String message, boolean error) {
+        queueStatus.setText(message == null ? "" : message);
+        queueStatus.setTextColor(error ? Color.rgb(153, 27, 27) : Color.rgb(22, 101, 52));
+        queueStatus.setBackgroundColor(error ? Color.rgb(254, 242, 242) : Color.rgb(240, 253, 244));
     }
 
     private TextView section(String value) {
@@ -381,7 +532,8 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     @Override
     public void onDisconnect(DisconnectReason reason) {
         readerConnected = false;
-        runOnUiThread(() -> { pay.setEnabled(false); setStatus("Reader disconnected: " + reason.name(), true); });
+        queueHandler.removeCallbacks(queuePoller);
+        runOnUiThread(() -> { updateControls(); setStatus("Reader disconnected: " + reason.name(), true); setQueueStatus("OFFLINE • Reconnect Tap to Pay.", true); });
     }
 
     @Override
@@ -392,12 +544,13 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     @Override
     public void onReaderReconnectSucceeded(Reader reader) {
         readerConnected = true;
-        runOnUiThread(() -> { pay.setEnabled(!busy); setStatus("Tap to Pay reconnected.", false); });
+        runOnUiThread(() -> { updateControls(); setStatus("Tap to Pay reconnected.", false); setQueueStatus("LIVE • Waiting for the Mac EPOS.", false); startQueuePolling(); });
     }
 
     @Override
     public void onReaderReconnectFailed(Reader reader) {
         readerConnected = false;
-        runOnUiThread(() -> { pay.setEnabled(false); setStatus("Reader reconnect failed. Tap Connect again.", true); });
+        queueHandler.removeCallbacks(queuePoller);
+        runOnUiThread(() -> { updateControls(); setStatus("Reader reconnect failed. Tap Connect again.", true); setQueueStatus("OFFLINE • Tap Connect again.", true); });
     }
 }
