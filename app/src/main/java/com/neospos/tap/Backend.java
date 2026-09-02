@@ -59,7 +59,7 @@ public final class Backend {
         }
     }
 
-    public static final class IntentData {
+    public static class IntentData {
         public final String clientSecret;
         public final String paymentIntentId;
         public final String receiptNo;
@@ -69,6 +69,31 @@ public final class Backend {
             this.paymentIntentId = paymentIntentId;
             this.receiptNo = receiptNo;
             this.amountMinor = amountMinor;
+        }
+    }
+
+    public static final class EposIntent extends IntentData {
+        public final String requestId;
+        EposIntent(String requestId, String clientSecret, String paymentIntentId, String receiptNo, long amountMinor) {
+            super(clientSecret, paymentIntentId, receiptNo, amountMinor);
+            this.requestId = requestId;
+        }
+    }
+
+    public static final class RequestState {
+        public final String requestStatus;
+        public final String paymentIntentStatus;
+        public final String saleStatus;
+        public final String receiptNo;
+        public final long amountMinor;
+        public final String errorMessage;
+        RequestState(String requestStatus, String paymentIntentStatus, String saleStatus, String receiptNo, long amountMinor, String errorMessage) {
+            this.requestStatus = requestStatus;
+            this.paymentIntentStatus = paymentIntentStatus;
+            this.saleStatus = saleStatus;
+            this.receiptNo = receiptNo;
+            this.amountMinor = amountMinor;
+            this.errorMessage = errorMessage;
         }
     }
 
@@ -151,6 +176,48 @@ public final class Backend {
                 require(out, "receipt_no"),
                 out.getLong("amount_minor")
         );
+    }
+
+    public EposIntent claimNextEposRequest() throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("store_id", storeId);
+        JSONObject out = function("tap-claim-request", body);
+        if (!out.has("request") || out.isNull("request")) return null;
+        JSONObject r = out.getJSONObject("request");
+        return new EposIntent(
+                require(r, "request_id"),
+                require(r, "client_secret"),
+                require(r, "payment_intent_id"),
+                require(r, "receipt_no"),
+                r.getLong("amount_minor")
+        );
+    }
+
+    public RequestState requestStatus(String requestId) throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("request_id", requestId);
+        JSONObject out = function("tap-request-status", body);
+        return new RequestState(
+                out.optString("request_status", ""),
+                out.optString("payment_intent_status", ""),
+                out.optString("sale_status", ""),
+                out.optString("receipt_no", ""),
+                out.optLong("amount_minor", 0),
+                out.optString("error_message", "")
+        );
+    }
+
+    public void failRequest(String requestId, String reason) throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("request_id", requestId);
+        body.put("reason", reason == null ? "Tap to Pay failed" : reason);
+        function("tap-fail-request", body);
     }
 
     public String paymentStatus(String paymentIntentId) throws Exception {
