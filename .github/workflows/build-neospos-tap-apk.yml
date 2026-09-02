@@ -3,6 +3,8 @@ name: Build NEOSPOS Tap to Pay APK
 on:
   push:
     branches: ["neospos-android-apk"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
