@@ -1,0 +1,81 @@
+name: Build NEOSPOS Tap to Pay APK
+
+on:
+  push:
+    branches: ["neospos-android-apk"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NEOSPOS Android
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build release APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Create temporary test signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore neospos-test.jks \
+            -storepass NEOSPOSTest2026 \
+            -keypass NEOSPOSTest2026 \
+            -alias neospos \
+            -keyalg RSA -keysize 2048 -validity 3650 \
+            -dname "CN=NEOSPOS Tap Test, OU=NEOSPOS, O=NEOSPOS, L=London, ST=London, C=GB"
+
+      - name: Align and sign non-debuggable release
+        run: |
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p dist
+          "$TOOLS/zipalign" -p -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            dist/NEOSPOS-TapToPay-aligned.apk
+          "$TOOLS/apksigner" sign \
+            --ks neospos-test.jks \
+            --ks-key-alias neospos \
+            --ks-pass pass:NEOSPOSTest2026 \
+            --key-pass pass:NEOSPOSTest2026 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out dist/NEOSPOS-TapToPay.apk \
+            dist/NEOSPOS-TapToPay-aligned.apk
+
+      - name: Verify APK
+        run: |
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          "$TOOLS/apksigner" verify --verbose --print-certs dist/NEOSPOS-TapToPay.apk
+          "$TOOLS/aapt" dump badging dist/NEOSPOS-TapToPay.apk
+          unzip -t dist/NEOSPOS-TapToPay.apk
+          sha256sum dist/NEOSPOS-TapToPay.apk | tee dist/NEOSPOS-TapToPay.sha256.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEOSPOS-TapToPay-Android
+          path: |
+            dist/NEOSPOS-TapToPay.apk
+            dist/NEOSPOS-TapToPay.sha256.txt
+          retention-days: 14
