@@ -4,6 +4,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.MediaType;
@@ -12,6 +14,16 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
+/**
+ * NEOSPOS Android backend client.
+ *
+ * Multi-tenant rule:
+ * - The publishable Supabase key is safe in the app.
+ * - No Stripe secret is embedded in the APK.
+ * - Terminal tokens, quick charges and EPOS basket PaymentIntents are created by Supabase
+ *   against the currently logged-in merchant's Stripe connected account.
+ * - The NEOSPOS platform Stripe account is reserved for SaaS subscription billing.
+ */
 public final class Backend {
     private static final String BASE = "https://lvwypfbnfmqazepigaug.supabase.co";
     private static final String API_KEY = "sb_publishable_tW1YEDt_sac3qkiDXdB7CA_PeieIGpw";
@@ -20,8 +32,8 @@ public final class Backend {
 
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(35, TimeUnit.SECONDS)
+            .writeTimeout(35, TimeUnit.SECONDS)
             .build();
 
     private volatile String accessToken;
@@ -115,7 +127,9 @@ public final class Backend {
         JSONObject user = auth.getJSONObject("user");
         userId = require(user, "id");
 
-        JSONArray memberships = requestArray("GET", BASE + "/rest/v1/merchant_users?select=merchant_id,role&user_id=eq." + enc(userId) + "&limit=1");
+        // A terminal session is tenant-scoped. Most staff belong to one merchant; when an account
+        // belongs to multiple merchants, the first membership remains the default terminal tenant.
+        JSONArray memberships = requestArray("GET", BASE + "/rest/v1/merchant_users?select=merchant_id,role&user_id=eq." + enc(userId) + "&order=created_at.asc&limit=1");
         if (memberships.length() == 0) throw new IOException("No NEOSPOS merchant is linked to this login.");
         merchantId = memberships.getJSONObject(0).getString("merchant_id");
 
@@ -135,7 +149,7 @@ public final class Backend {
             body.put("postcode", "SW1A 1AA");
             body.put("country", "GB");
             JSONArray created = requestRestInsert("stores", body);
-            if (created.length() == 0) throw new IOException("Could not create the test store.");
+            if (created.length() == 0) throw new IOException("Could not create the store.");
             storeId = created.getJSONObject(0).getString("id");
             storeName = created.getJSONObject(0).optString("name", "Main Store");
         } else {
@@ -162,15 +176,17 @@ public final class Backend {
         }
     }
 
+    /** Fetches a Stripe Terminal connection token for this merchant's connected Stripe account. */
     public Bootstrap terminalBootstrap() throws Exception {
         requireSession();
         JSONObject body = new JSONObject();
         body.put("merchant_id", merchantId);
         body.put("store_id", storeId);
-        JSONObject out = function("tap-to-pay-test-token", body);
+        JSONObject out = function("terminal-connection-token", body);
         return new Bootstrap(require(out, "secret"), require(out, "location_id"));
     }
 
+    /** Manual front-keypad charge, created on this merchant's connected Stripe account. */
     public IntentData createTestIntent(long amountMinor) throws Exception {
         requireSession();
         JSONObject body = new JSONObject();
@@ -178,7 +194,7 @@ public final class Backend {
         body.put("store_id", storeId);
         body.put("till_id", tillId);
         body.put("amount_minor", amountMinor);
-        JSONObject out = function("tap-to-pay-test-intent", body);
+        JSONObject out = function("merchant-quick-charge", body);
         return new IntentData(
                 require(out, "client_secret"),
                 require(out, "payment_intent_id"),
@@ -197,6 +213,7 @@ public final class Backend {
         return new PendingRequest(require(r, "id"), r.optLong("amount_minor", 0));
     }
 
+    /** Claims an EPOS basket. The backend creates its PaymentIntent on the merchant connected account. */
     public EposIntent claimNextEposRequest() throws Exception {
         requireSession();
         JSONObject body = new JSONObject();
@@ -239,12 +256,13 @@ public final class Backend {
         function("tap-fail-request", body);
     }
 
+    /** Final status is retrieved from the same merchant connected account. */
     public String paymentStatus(String paymentIntentId) throws Exception {
         requireSession();
         JSONObject body = new JSONObject();
         body.put("merchant_id", merchantId);
         body.put("payment_intent_id", paymentIntentId);
-        JSONObject out = function("tap-to-pay-test-status", body);
+        JSONObject out = function("mobile-payment-status", body);
         return require(out, "status");
     }
 
@@ -262,15 +280,13 @@ public final class Backend {
                 .header("Prefer", "return=representation")
                 .post(RequestBody.create(body.toString(), JSON))
                 .build();
-        String text = execute(request);
-        return new JSONArray(text);
+        return new JSONArray(execute(request));
     }
 
     private JSONArray requestArray(String method, String url) throws Exception {
         Request.Builder b = baseRequest(url, true);
         if ("GET".equals(method)) b.get();
-        String text = execute(b.build());
-        return new JSONArray(text);
+        return new JSONArray(execute(b.build()));
     }
 
     private JSONObject requestJson(String method, String url, JSONObject body, boolean authenticated, boolean prefer) throws Exception {
@@ -278,18 +294,12 @@ public final class Backend {
         if (prefer) b.header("Prefer", "return=representation");
         if ("POST".equals(method)) b.post(RequestBody.create(body.toString(), JSON));
         else if ("GET".equals(method)) b.get();
-        String text = execute(b.build());
-        return new JSONObject(text);
+        return new JSONObject(execute(b.build()));
     }
 
     private Request.Builder baseRequest(String url, boolean authenticated) {
-        Request.Builder b = new Request.Builder()
-                .url(url)
-                .header("apikey", API_KEY)
-                .header("Accept", "application/json");
-        if (authenticated && accessToken != null) {
-            b.header("Authorization", "Bearer " + accessToken);
-        }
+        Request.Builder b = new Request.Builder().url(url).header("apikey", API_KEY).header("Accept", "application/json");
+        if (authenticated && accessToken != null) b.header("Authorization", "Bearer " + accessToken);
         return b;
     }
 
@@ -321,6 +331,6 @@ public final class Backend {
     }
 
     private static String enc(String value) {
-        return value.replace(" ", "%20").replace("+", "%2B").replace("@", "%40");
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 }
