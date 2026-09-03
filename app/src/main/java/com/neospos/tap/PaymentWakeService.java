@@ -31,12 +31,12 @@ public class PaymentWakeService extends Service {
         createChannels();
         startForeground(NOTIFICATION_ID, activeNotification());
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleWithFixedDelay(this::pollQueue, 0, 2, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::pollQueue, 0, 3, TimeUnit.SECONDS);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     @Override
@@ -60,6 +60,8 @@ public class PaymentWakeService extends Service {
             lastRequestId = pending.requestId;
             wakeForPayment(pending);
         } catch (Exception ignored) {
+            // The foreground app also polls while connected. A transient background failure
+            // should not crash or restart the service.
         }
     }
 
@@ -99,13 +101,14 @@ public class PaymentWakeService extends Service {
                     .setAutoCancel(true)
                     .setContentIntent(pi)
                     .setPriority(Notification.PRIORITY_HIGH)
-                    .setVisibility(Notification.VISIBILITY_PUBLIC);
+                    .setVisibility(Notification.VISIBILITY_PRIVATE);
             nm.notify(NOTIFICATION_ID + 1, builder.build());
         }
 
         try {
             startActivity(activity);
         } catch (Exception ignored) {
+            // Android may block background activity launches; the high-priority notification remains available.
         }
     }
 
@@ -120,11 +123,12 @@ public class PaymentWakeService extends Service {
                 : new Notification.Builder(this);
         return b.setSmallIcon(android.R.drawable.ic_lock_idle_charging)
                 .setContentTitle("NEOSPOS Tap is listening")
-                .setContentText("Ready to wake for EPOS card payments")
+                .setContentText("Ready for EPOS card payments at this store")
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setOngoing(true)
                 .setContentIntent(open)
                 .setPriority(Notification.PRIORITY_LOW)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
                 .build();
     }
 
@@ -133,11 +137,13 @@ public class PaymentWakeService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
         NotificationChannel active = new NotificationChannel(CHANNEL_ACTIVE, "NEOSPOS terminal", NotificationManager.IMPORTANCE_LOW);
-        active.setDescription("Keeps the NEOSPOS payment listener active");
+        active.setDescription("Keeps the NEOSPOS payment listener active after login");
+        active.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         nm.createNotificationChannel(active);
         NotificationChannel payment = new NotificationChannel(CHANNEL_PAYMENT, "Payment requests", NotificationManager.IMPORTANCE_HIGH);
-        payment.setDescription("Wakes the terminal when an EPOS payment arrives");
+        payment.setDescription("Alerts the terminal when an EPOS payment arrives");
         payment.enableVibration(true);
+        payment.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         nm.createNotificationChannel(payment);
     }
 
