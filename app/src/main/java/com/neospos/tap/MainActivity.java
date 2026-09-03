@@ -2,10 +2,12 @@ package com.neospos.tap;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -260,7 +262,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         LinearLayout titleStack = new LinearLayout(this);
         titleStack.setOrientation(LinearLayout.VERTICAL);
         TextView title = text("Terminal Control", 22, true, NAVY);
-        TextView subtitle = text("NEOSPOS Tap • v1.2", 12, false, MUTED);
+        TextView subtitle = text("NEOSPOS Tap • v" + BuildConfig.VERSION_NAME, 12, false, MUTED);
         titleStack.addView(title);
         titleStack.addView(subtitle);
         drawerHeader.addView(titleStack, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
@@ -289,7 +291,6 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
 
         content.addView(section("ACCOUNT"));
         email = field("Email", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
-        email.setText("yasirrafique007@gmail.com");
         content.addView(email, fieldLp());
         password = field("Password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         content.addView(password, fieldLp());
@@ -423,8 +424,10 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                 Backend.Session s = Backend.get().loginAndPrepare(e, p);
                 runOnUiThread(() -> {
                     context.setText("Signed in • " + s.storeName + " • " + s.tillName);
+                    password.setText("");
                     try {
                         initTerminal();
+                        startPaymentWakeService();
                         updateControls();
                         setBusy(false, "Logged in. Connect Tap to Pay.");
                         Reader current = Terminal.getInstance().getConnectedReader();
@@ -437,6 +440,16 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                 runOnUiThread(() -> setBusy(false, "Login/setup failed: " + ex.getMessage()));
             }
         }).start();
+    }
+
+    private void startPaymentWakeService() {
+        try {
+            Intent listener = new Intent(this, PaymentWakeService.class);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(listener);
+            else startService(listener);
+        } catch (Exception ex) {
+            setQueueStatus("Background payment alerts unavailable: " + ex.getMessage(), true);
+        }
     }
 
     private void initTerminal() throws TerminalException {
@@ -639,14 +652,32 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
     private void failEposRequest(Backend.EposIntent data, String reason) {
         final String message = reason == null || reason.isEmpty() ? "Tap to Pay failed" : reason;
         new Thread(() -> {
-            try { Backend.get().failRequest(data.requestId, message); } catch (Exception ignored) {}
-            runOnUiThread(() -> {
-                busy = false;
-                updateControls();
-                updateAmountUi();
-                setStatus("Payment failed: " + message, true);
-                setQueueStatus("FAILED • Mac EPOS can send the payment again.", true);
-            });
+            try {
+                Backend.get().failRequest(data.requestId, message);
+                Backend.RequestState state = Backend.get().requestStatus(data.requestId);
+                runOnUiThread(() -> {
+                    busy = false;
+                    updateControls();
+                    updateAmountUi();
+                    if ("succeeded".equalsIgnoreCase(state.requestStatus)) {
+                        String receipt = state.receiptNo == null || state.receiptNo.isEmpty() ? data.receiptNo : state.receiptNo;
+                        setStatus("APPROVED ✓  " + receipt + " • payment reconciled", false);
+                        setQueueStatus("APPROVED ✓  Stripe had already completed the payment.", false);
+                    } else {
+                        String why = state.errorMessage == null || state.errorMessage.isEmpty() ? message : state.errorMessage;
+                        setStatus("Payment failed: " + why, true);
+                        setQueueStatus("FAILED • Mac EPOS can send the payment again.", true);
+                    }
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    updateControls();
+                    updateAmountUi();
+                    setStatus("Payment state needs checking: " + ex.getMessage(), true);
+                    setQueueStatus("Do not retry until Payments is checked on the Mac EPOS.", true);
+                });
+            }
         }).start();
     }
 
@@ -660,7 +691,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                 Backend.IntentData data = Backend.get().createTestIntent(finalMinor);
                 runOnUiThread(() -> retrieveAndProcessManual(data));
             } catch (Exception ex) {
-                runOnUiThread(() -> setBusy(false, "Could not create payment: " + ex.getMessage()));
+                runOnUiThread(() -> setBusy(false, "Could not create payment: " + ex.getMessage() + " • retrying the same amount is safe."));
             }
         }).start();
     }
@@ -677,14 +708,34 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                         new Thread(() -> confirmManualBackend(data)).start();
                     }
                     @Override public void onFailure(TerminalException e) {
-                        runOnUiThread(() -> setBusy(false, "Payment failed: " + e.getErrorMessage()));
+                        failManualPayment(data, e.getErrorMessage());
                     }
                 });
             }
             @Override public void onFailure(TerminalException e) {
-                runOnUiThread(() -> setBusy(false, "Could not load payment: " + e.getErrorMessage()));
+                failManualPayment(data, e.getErrorMessage());
             }
         });
+    }
+
+    private void failManualPayment(Backend.IntentData data, String reason) {
+        final String message = reason == null || reason.isEmpty() ? "Tap to Pay failed" : reason;
+        new Thread(() -> {
+            try {
+                String finalStatus = Backend.get().failManualPayment(data.paymentIntentId, message);
+                runOnUiThread(() -> {
+                    if ("succeeded".equalsIgnoreCase(finalStatus)) {
+                        amountMinorInput = 0;
+                        setBusy(false, "APPROVED ✓  " + data.receiptNo + " • payment reconciled");
+                        updateAmountUi();
+                    } else {
+                        setBusy(false, "Payment failed: " + message);
+                    }
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> setBusy(false, "Payment state needs checking: " + ex.getMessage() + " • do not retry until verified."));
+            }
+        }).start();
     }
 
     private void confirmManualBackend(Backend.IntentData data) {
@@ -704,27 +755,30 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
                 } else if ("canceled".equalsIgnoreCase(finalStatus)) {
                     setBusy(false, "Payment canceled • " + data.receiptNo);
                 } else {
-                    setBusy(false, "Stripe is still processing • " + data.receiptNo);
+                    setBusy(false, "Stripe is still processing • " + data.receiptNo + " • check Payments before retrying.");
                 }
             });
         } catch (Exception ex) {
-            runOnUiThread(() -> setBusy(false, "Card processed; backend check failed: " + ex.getMessage()));
+            runOnUiThread(() -> setBusy(false, "Card processed; backend check failed: " + ex.getMessage() + " • check Payments before retrying."));
         }
     }
 
     private void requestNeededPermissions() {
         List<String> p = new ArrayList<>();
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) p.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
+        if (Build.VERSION.SDK_INT >= 31) {
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) p.add(Manifest.permission.BLUETOOTH_SCAN);
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) p.add(Manifest.permission.BLUETOOTH_CONNECT);
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            p.add(Manifest.permission.POST_NOTIFICATIONS);
         }
         if (!p.isEmpty()) requestPermissions(p.toArray(new String[0]), PERMISSION_REQUEST);
     }
 
     private boolean permissionsGranted() {
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return false;
-        if (android.os.Build.VERSION.SDK_INT >= 31) {
+        if (Build.VERSION.SDK_INT >= 31) {
             return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
                     && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
         }
@@ -789,7 +843,7 @@ public class MainActivity extends Activity implements TapToPayReaderListener {
         if (queueStatus != null) {
             queueStatus.setText(message == null ? "" : message);
             queueStatus.setTextColor(error ? Color.rgb(153, 27, 27) : Color.rgb(22, 101, 52));
-            style(queueStatus, error ? Color.rgb(254, 242, 242) : Color.rgb(240, 253, 244), 12, 0, Color.TRANSPARENT);
+            style(queueStatus, error ? Color.rgb(254, 242, 242) : Color.rgb(240, 253, 244), 12, 0, LINE);
         }
         if (frontQueue != null) {
             frontQueue.setText(message == null ? "" : message);
