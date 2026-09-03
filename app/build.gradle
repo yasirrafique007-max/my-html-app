@@ -1,0 +1,40 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.neospos.tap'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.neospos.tap'
+        minSdk 33
+        targetSdk 35
+        versionCode 6
+        versionName '1.5-hardened'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.stripe:stripeterminal-taptopay:5.7.0'
+    implementation 'com.stripe:stripeterminal-core:5.7.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

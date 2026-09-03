@@ -1,0 +1,105 @@
+name: Build NEOSPOS Tap to Pay APK
+
+on:
+  push:
+    branches: ["neospos-android-apk"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NEOSPOS Android
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build release APK
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Align and sign release APK
+        env:
+          NEOSPOS_KEYSTORE_B64: ${{ secrets.NEOSPOS_KEYSTORE_B64 }}
+          NEOSPOS_KEYSTORE_PASSWORD: ${{ secrets.NEOSPOS_KEYSTORE_PASSWORD }}
+          NEOSPOS_KEY_ALIAS: ${{ secrets.NEOSPOS_KEY_ALIAS }}
+          NEOSPOS_KEY_PASSWORD: ${{ secrets.NEOSPOS_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p dist
+          "$TOOLS/zipalign" -p -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            dist/NEOSPOS-TapToPay-aligned.apk
+
+          if [[ -n "${NEOSPOS_KEYSTORE_B64:-}" && -n "${NEOSPOS_KEYSTORE_PASSWORD:-}" && -n "${NEOSPOS_KEY_ALIAS:-}" && -n "${NEOSPOS_KEY_PASSWORD:-}" ]]; then
+            echo "$NEOSPOS_KEYSTORE_B64" | base64 --decode > neospos-release.jks
+            KEYSTORE_FILE="neospos-release.jks"
+            KEYSTORE_PASSWORD="$NEOSPOS_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$NEOSPOS_KEY_ALIAS"
+            KEY_PASSWORD="$NEOSPOS_KEY_PASSWORD"
+            echo "stable-secret-backed" > dist/signing-mode.txt
+          else
+            KEYSTORE_FILE="neospos-ephemeral.jks"
+            KEYSTORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_ALIAS="neospos-ephemeral"
+            KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_FILE" \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 3650 \
+              -dname "CN=NEOSPOS Ephemeral CI, OU=CI, O=NEOSPOS, L=London, ST=London, C=GB"
+            echo "ephemeral-ci-only" > dist/signing-mode.txt
+            echo "WARNING: stable signing secrets are not configured. This APK cannot reliably upgrade an APK signed by another CI run." >&2
+          fi
+
+          "$TOOLS/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out dist/NEOSPOS-TapToPay.apk \
+            dist/NEOSPOS-TapToPay-aligned.apk
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          "$TOOLS/apksigner" verify --verbose --print-certs dist/NEOSPOS-TapToPay.apk
+          "$TOOLS/aapt" dump badging dist/NEOSPOS-TapToPay.apk
+          unzip -t dist/NEOSPOS-TapToPay.apk
+          sha256sum dist/NEOSPOS-TapToPay.apk | tee dist/NEOSPOS-TapToPay.sha256.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEOSPOS-TapToPay-Android
+          path: |
+            dist/NEOSPOS-TapToPay.apk
+            dist/NEOSPOS-TapToPay.sha256.txt
+            dist/signing-mode.txt
+          retention-days: 14
