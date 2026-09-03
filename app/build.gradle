@@ -8,8 +8,8 @@ android {
         applicationId 'com.neospos.tap'
         minSdk 33
         targetSdk 35
-        versionCode 5
-        versionName '1.4-multitenant'
+        versionCode 6
+        versionName '1.5-hardened'
     }
 
     buildFeatures {
