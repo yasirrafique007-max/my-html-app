@@ -11,6 +11,8 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 
+import com.stripe.stripeterminal.Terminal;
+
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -51,6 +53,10 @@ public class PaymentWakeService extends Service {
     private void pollQueue() {
         try {
             if (!Backend.get().isLoggedIn()) return;
+            if (!Terminal.isInitialized() || Terminal.getInstance().getConnectedReader() == null) {
+                lastRequestId = "";
+                return;
+            }
             Backend.PendingRequest pending = Backend.get().peekPendingEposRequest();
             if (pending == null) {
                 lastRequestId = "";
@@ -122,8 +128,8 @@ public class PaymentWakeService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ACTIVE)
                 : new Notification.Builder(this);
         return b.setSmallIcon(android.R.drawable.ic_lock_idle_charging)
-                .setContentTitle("NEOSPOS Tap is listening")
-                .setContentText("Ready for EPOS card payments at this store")
+                .setContentTitle("NEOSPOS payment listener active")
+                .setContentText("Ready to monitor this store once Tap to Pay is connected")
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setOngoing(true)
                 .setContentIntent(open)
@@ -137,7 +143,7 @@ public class PaymentWakeService extends Service {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
         NotificationChannel active = new NotificationChannel(CHANNEL_ACTIVE, "NEOSPOS terminal", NotificationManager.IMPORTANCE_LOW);
-        active.setDescription("Keeps the NEOSPOS payment listener active after login");
+        active.setDescription("Keeps the authenticated NEOSPOS payment listener active");
         active.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         nm.createNotificationChannel(active);
         NotificationChannel payment = new NotificationChannel(CHANNEL_PAYMENT, "Payment requests", NotificationManager.IMPORTANCE_HIGH);
