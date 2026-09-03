@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.MediaType;
@@ -37,12 +38,18 @@ public final class Backend {
             .build();
 
     private volatile String accessToken;
+    private volatile String refreshToken;
+    private volatile long accessTokenExpiresAtEpochSeconds;
     private volatile String userId;
     private volatile String merchantId;
     private volatile String storeId;
     private volatile String tillId;
     private volatile String storeName;
     private volatile String tillName;
+
+    // Preserved across ambiguous network failures so a retry cannot create a second quick charge.
+    private String pendingQuickChargeKey;
+    private long pendingQuickChargeAmount = -1;
 
     public static Backend get() { return INSTANCE; }
     private Backend() {}
@@ -119,23 +126,28 @@ public final class Backend {
     }
 
     public Session loginAndPrepare(String email, String password) throws Exception {
-        JSONObject login = new JSONObject();
-        login.put("email", email.trim());
-        login.put("password", password);
-        JSONObject auth = requestJson("POST", BASE + "/auth/v1/token?grant_type=password", login, false, false);
-        accessToken = require(auth, "access_token");
-        JSONObject user = auth.getJSONObject("user");
-        userId = require(user, "id");
+        clearSession();
+        try {
+            JSONObject login = new JSONObject();
+            login.put("email", email.trim());
+            login.put("password", password);
+            JSONObject auth = requestJson("POST", BASE + "/auth/v1/token?grant_type=password", login, false, false);
+            adoptAuthSession(auth);
+            JSONObject user = auth.getJSONObject("user");
+            userId = require(user, "id");
 
-        // A terminal session is tenant-scoped. Most staff belong to one merchant; when an account
-        // belongs to multiple merchants, the first membership remains the default terminal tenant.
-        JSONArray memberships = requestArray("GET", BASE + "/rest/v1/merchant_users?select=merchant_id,role&user_id=eq." + enc(userId) + "&order=created_at.asc&limit=1");
-        if (memberships.length() == 0) throw new IOException("No NEOSPOS merchant is linked to this login.");
-        merchantId = memberships.getJSONObject(0).getString("merchant_id");
+            // A terminal session is tenant-scoped. Use the oldest active membership as the default.
+            JSONArray memberships = requestArray("GET", BASE + "/rest/v1/merchant_users?select=merchant_id,role&user_id=eq." + enc(userId) + "&active=eq.true&order=created_at.asc&limit=1");
+            if (memberships.length() == 0) throw new IOException("No active NEOSPOS merchant is linked to this login.");
+            merchantId = memberships.getJSONObject(0).getString("merchant_id");
 
-        ensureStore();
-        ensureTill();
-        return new Session(merchantId, storeId, tillId, storeName, tillName);
+            ensureStore();
+            ensureTill();
+            return new Session(merchantId, storeId, tillId, storeName, tillName);
+        } catch (Exception e) {
+            clearSession();
+            throw e;
+        }
     }
 
     private void ensureStore() throws Exception {
@@ -189,24 +201,33 @@ public final class Backend {
     /** Manual front-keypad charge, created on this merchant's connected Stripe account. */
     public IntentData createTestIntent(long amountMinor) throws Exception {
         requireSession();
+        final String idempotencyKey = quickChargeKey(amountMinor);
         JSONObject body = new JSONObject();
         body.put("merchant_id", merchantId);
         body.put("store_id", storeId);
         body.put("till_id", tillId);
         body.put("amount_minor", amountMinor);
-        JSONObject out = function("merchant-quick-charge", body);
-        return new IntentData(
-                require(out, "client_secret"),
-                require(out, "payment_intent_id"),
-                require(out, "receipt_no"),
-                out.getLong("amount_minor")
-        );
+        body.put("idempotency_key", idempotencyKey);
+        try {
+            JSONObject out = function("merchant-quick-charge", body);
+            clearQuickChargeKey(idempotencyKey);
+            return new IntentData(
+                    require(out, "client_secret"),
+                    require(out, "payment_intent_id"),
+                    require(out, "receipt_no"),
+                    out.getLong("amount_minor")
+            );
+        } catch (Exception e) {
+            // Keep the key. A later retry of the same amount will safely replay the same server request.
+            throw e;
+        }
     }
 
     public PendingRequest peekPendingEposRequest() throws Exception {
         requireSession();
         JSONObject body = new JSONObject();
         body.put("merchant_id", merchantId);
+        body.put("store_id", storeId);
         JSONObject out = function("tap-peek-request", body);
         if (!out.optBoolean("pending", false) || !out.has("request") || out.isNull("request")) return null;
         JSONObject r = out.getJSONObject("request");
@@ -256,6 +277,16 @@ public final class Backend {
         function("tap-fail-request", body);
     }
 
+    public String failManualPayment(String paymentIntentId, String reason) throws Exception {
+        requireSession();
+        JSONObject body = new JSONObject();
+        body.put("merchant_id", merchantId);
+        body.put("payment_intent_id", paymentIntentId);
+        body.put("reason", reason == null ? "Tap to Pay failed" : reason);
+        JSONObject out = function("mobile-fail-payment", body);
+        return out.optString("status", "failed");
+    }
+
     /** Final status is retrieved from the same merchant connected account. */
     public String paymentStatus(String paymentIntentId) throws Exception {
         requireSession();
@@ -269,7 +300,21 @@ public final class Backend {
     public String getMerchantId() { return merchantId; }
     public String getStoreId() { return storeId; }
     public String getTillId() { return tillId; }
-    public boolean isLoggedIn() { return accessToken != null && merchantId != null; }
+    public boolean isLoggedIn() { return accessToken != null && refreshToken != null && merchantId != null; }
+
+    public synchronized void clearSession() {
+        accessToken = null;
+        refreshToken = null;
+        accessTokenExpiresAtEpochSeconds = 0;
+        userId = null;
+        merchantId = null;
+        storeId = null;
+        tillId = null;
+        storeName = null;
+        tillName = null;
+        pendingQuickChargeKey = null;
+        pendingQuickChargeAmount = -1;
+    }
 
     private JSONObject function(String slug, JSONObject body) throws Exception {
         return requestJson("POST", BASE + "/functions/v1/" + slug, body, true, false);
@@ -297,27 +342,81 @@ public final class Backend {
         return new JSONObject(execute(b.build()));
     }
 
-    private Request.Builder baseRequest(String url, boolean authenticated) {
+    private Request.Builder baseRequest(String url, boolean authenticated) throws Exception {
+        if (authenticated) refreshAccessToken(false);
         Request.Builder b = new Request.Builder().url(url).header("apikey", API_KEY).header("Accept", "application/json");
         if (authenticated && accessToken != null) b.header("Authorization", "Bearer " + accessToken);
         return b;
     }
 
     private String execute(Request request) throws Exception {
+        return execute(request, true);
+    }
+
+    private String execute(Request request, boolean allowAuthRetry) throws Exception {
         try (Response response = http.newCall(request).execute()) {
             String text = response.body() == null ? "" : response.body().string();
-            if (!response.isSuccessful()) {
-                String message = text;
-                try {
-                    JSONObject e = new JSONObject(text);
-                    if (e.has("error")) message = e.getString("error");
-                    else if (e.has("message")) message = e.getString("message");
-                    else if (e.has("msg")) message = e.getString("msg");
-                } catch (Exception ignored) {}
-                throw new IOException(message.isEmpty() ? ("Request failed: " + response.code()) : message);
+            if (response.code() == 401 && allowAuthRetry && request.header("Authorization") != null && refreshToken != null) {
+                refreshAccessToken(true);
+                Request retry = request.newBuilder().header("Authorization", "Bearer " + accessToken).build();
+                return execute(retry, false);
             }
+            if (!response.isSuccessful()) throw new IOException(errorMessage(text, response.code()));
             return text;
         }
+    }
+
+    private synchronized void refreshAccessToken(boolean force) throws Exception {
+        if (refreshToken == null || refreshToken.isEmpty()) return;
+        long now = System.currentTimeMillis() / 1000L;
+        if (!force && accessToken != null && now + 90 < accessTokenExpiresAtEpochSeconds) return;
+
+        JSONObject body = new JSONObject();
+        body.put("refresh_token", refreshToken);
+        Request request = new Request.Builder()
+                .url(BASE + "/auth/v1/token?grant_type=refresh_token")
+                .header("apikey", API_KEY)
+                .header("Accept", "application/json")
+                .post(RequestBody.create(body.toString(), JSON))
+                .build();
+        String text = execute(request, false);
+        adoptAuthSession(new JSONObject(text));
+    }
+
+    private synchronized void adoptAuthSession(JSONObject auth) throws Exception {
+        accessToken = require(auth, "access_token");
+        String newRefresh = auth.optString("refresh_token", "");
+        if (!newRefresh.isEmpty()) refreshToken = newRefresh;
+        long now = System.currentTimeMillis() / 1000L;
+        long expiresAt = auth.optLong("expires_at", 0);
+        long expiresIn = auth.optLong("expires_in", 3600);
+        accessTokenExpiresAtEpochSeconds = expiresAt > now ? expiresAt : now + Math.max(60, expiresIn);
+    }
+
+    private synchronized String quickChargeKey(long amountMinor) {
+        if (pendingQuickChargeKey == null || pendingQuickChargeAmount != amountMinor) {
+            pendingQuickChargeKey = UUID.randomUUID().toString();
+            pendingQuickChargeAmount = amountMinor;
+        }
+        return pendingQuickChargeKey;
+    }
+
+    private synchronized void clearQuickChargeKey(String key) {
+        if (key != null && key.equals(pendingQuickChargeKey)) {
+            pendingQuickChargeKey = null;
+            pendingQuickChargeAmount = -1;
+        }
+    }
+
+    private String errorMessage(String text, int responseCode) {
+        String message = text;
+        try {
+            JSONObject e = new JSONObject(text);
+            if (e.has("error")) message = e.getString("error");
+            else if (e.has("message")) message = e.getString("message");
+            else if (e.has("msg")) message = e.getString("msg");
+        } catch (Exception ignored) {}
+        return message == null || message.isEmpty() ? ("Request failed: " + responseCode) : message;
     }
 
     private void requireSession() throws IOException {
